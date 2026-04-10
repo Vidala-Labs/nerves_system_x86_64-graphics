@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CamNode Build System <build@vidala-labs.com>
+Date: Wed, 9 Apr 2026 13:00:00 -0700
+Subject: [PATCH] pinctrl: intel: geminilake: preserve PCIe interrupt state
+ during init
+
+Skip GPIO interrupt masking for pin group containing PCIE_WAKE and
+PCIE_CLKREQ signals (pins 32-63 in North community) to prevent
+disrupting PCIe device enumeration.
+
+On HP Gemini Lake devices, the pinctrl-geminilake driver probe occurs
+early via subsys_initcall(), potentially during PCIe bus enumeration.
+The generic intel_gpio_irq_init() masks all GPIO interrupts, which can
+interfere with PCIe wake and clock request signaling, causing WiFi and
+other PCIe devices to fail enumeration.
+
+This patch identifies the North community (uid "2") and skips interrupt
+masking for pin group 1 (pins 32-63) which contains:
+- PCIE_WAKE0_B through PCIE_WAKE3_B (pins 40-43)
+- PCIE_CLKREQ0_B through PCIE_CLKREQ3_B (pins 44-47)
+
+Background:
+The Gemini Lake pinctrl driver is needed to provide GPIOLIB_IRQCHIP for
+I2C-HID touchscreen interrupt support. However, enabling it breaks WiFi
+on some HP devices with Realtek RTL8821CE adapters. This patch allows
+both touchscreen GPIO interrupts and PCIe device functionality to coexist.
+
+Signed-off-by: CamNode Build System <build@vidala-labs.com>
+---
+ drivers/pinctrl/intel/pinctrl-intel.c | 26 +++++++++++++++++++++++++-
+ 1 file changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/pinctrl/intel/pinctrl-intel.c b/drivers/pinctrl/intel/pinctrl-intel.c
+--- a/drivers/pinctrl/intel/pinctrl-intel.c
++++ b/drivers/pinctrl/intel/pinctrl-intel.c
+@@ -1294,12 +1294,36 @@ static irqreturn_t intel_gpio_irq(int irq, void *data)
+
+ static void intel_gpio_irq_init(struct intel_pinctrl *pctrl)
+ {
++	const struct intel_pinctrl_soc_data *soc = pctrl->soc;
+ 	const struct intel_community *community;
+
+ 	for_each_intel_pin_community(pctrl, community) {
+ 		void __iomem *reg, *is;
+ 		unsigned int gpp;
+
+ 		for (gpp = 0; gpp < community->ngpps; gpp++) {
++			/*
++			 * Gemini Lake North community workaround:
++			 * Skip interrupt masking for pin group 1 (pins 32-63)
++			 * which contains PCIe wake and clock request signals.
++			 *
++			 * On HP Gemini Lake devices, masking these pins during
++			 * early boot (subsys_initcall) can disrupt PCIe device
++			 * enumeration, particularly WiFi adapters.
++			 *
++			 * North community is identified by uid "2" and has:
++			 * - gpp_size = 32 (pins grouped 0-31, 32-63, 64-79)
++			 * - Pin group 1 (gpp=1) contains PCIE_WAKE0-3_B (40-43)
++			 *   and PCIE_CLKREQ0-3_B (44-47)
++			 */
++			if (soc->uid && strcmp(soc->uid, "2") == 0 &&
++			    community->gpp_size == 32 && gpp == 1) {
++				dev_info(pctrl->dev,
++					 "Preserving PCIe interrupt state for pin group %u (pins %u-%u)\n",
++					 gpp, community->pin_base + (gpp * 32),
++					 community->pin_base + (gpp * 32) + 31);
++				continue;
++			}
++
+ 			reg = community->regs + community->ie_offset + gpp * 4;
+ 			is = community->regs + community->is_offset + gpp * 4;
+
+--
+2.43.0
