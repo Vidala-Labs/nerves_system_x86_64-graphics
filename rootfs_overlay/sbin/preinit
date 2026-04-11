@@ -1,0 +1,48 @@
+#!/bin/sh
+# Pre-init script that runs before erlinit
+# This ensures the data partition is MOUNTABLE before erlinit tries to mount it
+
+echo "<6>preinit: STARTED" > /dev/kmsg 2>/dev/null
+
+# Set up minimal environment needed for mount to work
+mkdir -p /proc /sys /tmp /dev
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t tmpfs tmpfs /tmp 2>/dev/null
+
+echo "<6>preinit: mounted proc/sys/tmp" > /dev/kmsg 2>/dev/null
+
+MAX_ATTEMPTS=30
+attempt=1
+
+while [ $attempt -le $MAX_ATTEMPTS ]; do
+    echo "<6>preinit: attempt $attempt" > /dev/kmsg 2>/dev/null
+
+    for dev in /dev/sda4 /dev/sdb4 /dev/sdc4; do
+        if [ -b "$dev" ]; then
+            echo "<6>preinit: trying to mount $dev" > /dev/kmsg 2>/dev/null
+            mkdir -p /tmp/preinit_test
+            if mount -t ext4 -o ro "$dev" /tmp/preinit_test 2>/dev/null; then
+                echo "<6>preinit: SUCCESS - $dev is mountable" > /dev/kmsg 2>/dev/null
+                umount /tmp/preinit_test 2>/dev/null
+                # Clean up before handing off to erlinit
+                umount /tmp 2>/dev/null
+                umount /sys 2>/dev/null
+                umount /proc 2>/dev/null
+                echo "<6>preinit: starting erlinit" > /dev/kmsg 2>/dev/null
+                exec /sbin/init "$@"
+            fi
+        fi
+    done
+
+    echo "<6>preinit: waiting... ($attempt/$MAX_ATTEMPTS)" > /dev/kmsg 2>/dev/null
+    sleep 1
+    attempt=$((attempt + 1))
+done
+
+echo "<6>preinit: WARNING - gave up, starting erlinit anyway" > /dev/kmsg 2>/dev/null
+# Clean up before handing off
+umount /tmp 2>/dev/null
+umount /sys 2>/dev/null
+umount /proc 2>/dev/null
+exec /sbin/init "$@"
